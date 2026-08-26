@@ -1,0 +1,25 @@
+name: GLaDOS Auto Checkin
+
+on:
+  schedule:
+    # GLaDOS 以 UTC 计算"一天"，在 UTC 0x:0y 前后签最稳。
+    # 这里用每天 07:0x 北京时间附近 + npm 时间戳对齐（Actions 时区为 UTC）。
+    # UTC 23:1x 触发 ≈ 北京 07:1x
+    - cron: "15 23 * * *"
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run checkin
+        env:
+          GR_COOKIE: ${{ secrets.GR_COOKIE }}
+        run: python checkin.py
