@@ -22,4 +22,6 @@ jobs:
       - name: Run checkin
         env:
           GR_COOKIE: ${{ secrets.GR_COOKIE }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python checkin.py

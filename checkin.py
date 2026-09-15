@@ -11,11 +11,14 @@ GLaDOS 兑换方案（planType -> 所需积分 -> 天数）：
   plan100 -> 100 积分 -> 10 天
   plan200 -> 200 积分 -> 30 天
   plan500 -> 500 积分 -> 100 天
+
+通知：可选 TG_BOT_TOKEN + TG_CHAT_ID（成功/失败都会推）
 """
 import json
 import os
 import sys
 import urllib.request
+import urllib.error
 
 BASE = "https://glados.space"
 
@@ -24,6 +27,27 @@ PLANS = {
     "plan100": (100, 10),
     "plan500": (500, 100),
 }
+
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
+
+
+def notify(icon, title, lines):
+    """推送到 Telegram。未配置则静默跳过，绝不影响主流程。"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    text = f"{icon} GLaDOS {title}\n\n" + "\n".join(str(x) for x in lines if x)
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+            data=json.dumps({"chat_id": TG_CHAT_ID, "text": text}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            ok = json.loads(r.read()).get("ok")
+            print("📩 TG 通知已发送" if ok else "⚠️ TG 通知返回异常")
+    except Exception as e:
+        print(f"⚠️ TG 通知失败: {type(e).__name__}: {e}")
 
 
 def call(path, cookie, method="GET", body=None):
@@ -61,6 +85,7 @@ def main():
     cookie = os.environ.get("GR_COOKIE")
     if not cookie:
         print("签到失败: GR_COOKIE 环境变量未设置")
+        notify("❌", "签到失败", ["原因: GR_COOKIE 环境变量未设置"])
         sys.exit(1)
 
     try:
@@ -109,15 +134,24 @@ def main():
         print(f"剩余天数: {left_days}")
         for line in exchange_log:
             print(line)
+
+        # 5. 推送通知
+        icon = "✅" if code in (0, 1) else "⚠️"
+        notify(icon, "签到", [f"📧 {email}", f"🎁 {result}"]
+               + [f"📝 {x}" for x in exchange_log] + [f"📅 剩余 {int(left_days)} 天"])
         sys.exit(0)
 
     except urllib.error.HTTPError as e:
         print(f"签到失败: HTTP {e.code} - {e.reason}")
         buf = e.read().decode("utf-8", errors="replace")[:200]
         print(f"响应: {buf}")
+        # cookie 失效是最常见原因，单独提示
+        hint = "（很可能是 GR_COOKIE 过期，需要重新获取）" if e.code in (401, 403) else ""
+        notify("❌", "签到失败", [f"HTTP {e.code} - {e.reason}", f"响应: {buf}", hint])
         sys.exit(2)
     except Exception as e:
         print(f"签到失败: {type(e).__name__}: {e}")
+        notify("❌", "签到失败", [f"{type(e).__name__}: {e}"])
         sys.exit(2)
 
 
