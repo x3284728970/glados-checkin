@@ -32,6 +32,18 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
 
+def mask_email(email):
+    """邮箱脱敏，和 katabump 的格式保持一致: zcj3284728970@gmail.com -> zc****70@gmail.com"""
+    if not email:
+        return "?"
+    if "@" in email:
+        name, domain = email.split("@", 1)
+        if len(name) > 4:
+            return f"{name[:2]}****{name[-2:]}@{domain}"
+        return f"{name}@{domain}"
+    return email[:2] + "****"
+
+
 def notify(icon, title, lines):
     """推送到 Telegram。未配置则静默跳过，绝不影响主流程。"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
@@ -128,8 +140,9 @@ def main():
             else:
                 exchange_log.append(f"剩余 {int(left_days)} 天 > 3，暂不兑换，继续攒积分")
 
-        # 4. 输出
-        print(f"邮箱: {email}")
+        # 4. 输出（日志与通知都用脱敏邮箱，避免明文外泄）
+        masked = mask_email(email)
+        print(f"邮箱: {masked}")
         print(f"签到结果: {result}")
         print(f"剩余天数: {left_days}")
         for line in exchange_log:
@@ -137,7 +150,7 @@ def main():
 
         # 5. 推送通知
         icon = "✅" if code in (0, 1) else "⚠️"
-        notify(icon, "签到", [f"📧 {email}", f"🎁 {result}"]
+        notify(icon, "签到", [f"👤 {masked}", f"🎁 {result}"]
                + [f"📝 {x}" for x in exchange_log] + [f"📅 剩余 {int(left_days)} 天"])
         sys.exit(0)
 
