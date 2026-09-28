@@ -19,9 +19,11 @@ GLaDOS 兑换方案（planType -> 所需积分 -> 天数）：
   不一致返回 code=4 + reason=device-mismatch。脚本按返回的 loginDevice
   自动切换请求特征后重试一次。
 """
+import base64
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 
@@ -66,6 +68,22 @@ def mask_email(email):
             return f"{name[:2]}****{name[-2:]}@{domain}"
         return f"{name}@{domain}"
     return email[:2] + "****"
+
+
+def session_expiry(cookie):
+    """会话 cookie 的值是 base64 的 JSON，含 expires 时间戳；解析失败返回 None"""
+    for piece in cookie.split(";"):
+        name, _, value = piece.strip().partition("=")
+        if name not in ("gld:sess", "koa:sess"):
+            continue
+        try:
+            raw = base64.b64decode(value + "=" * (-len(value) % 4)).decode("utf-8", "replace")
+            data = json.loads(raw)
+        except Exception:
+            return None
+        expiry = data.get("expires")
+        return expiry if isinstance(expiry, (int, float)) else None
+    return None
 
 
 def notify(icon, title, lines):
@@ -158,9 +176,28 @@ def main():
 
         # 1. 获取用户信息（邮箱 + 剩余天数）
         _, info = call("/user/status", cookie, ua=ua)
+        if info.get("code") != 0:
+            # 未认证：cookie 名称改版或会话过期都会走到这里，直接给出可执行的处理方式
+            print(f"会话已失效：服务端返回 code={info.get('code')} {info.get('message', '')}")
+            print("需要重新登录 GLaDOS 获取新的 gld:sess 与 gld:sess.sig，并更新 GR_COOKIE")
+            notify("❌", "会话失效", [
+                f"服务端返回: code={info.get('code')} {info.get('message', '')}",
+                "原因: GR_COOKIE 已不被接受（站点改版改名 gld:sess 或会话过期）",
+                "处理: 打开 https://glados.space/login 用邮箱验证码登录，"
+                "复制 gld:sess 与 gld:sess.sig 两个 cookie，更新仓库 secret GR_COOKIE",
+            ])
+            sys.exit(3)
         data = info.get("data", {})
         email = data.get("email", "未知邮箱")
         left_days = float(data.get("leftDays", 0) or 0)
+
+        # 会话剩余有效期（cookie 内自带 expires 时间戳）
+        session_note = ""
+        expiry = session_expiry(cookie)
+        if expiry:
+            days_left = (expiry - time.time()) / 86400
+            if days_left <= 3:
+                session_note = f"⚠️ 会话 cookie 约 {days_left:.1f} 天后到期，建议提前更新 GR_COOKIE"
 
         # 2. 签到
         chk, ua, ua_note = checkin(cookie, ua)
@@ -207,11 +244,14 @@ def main():
         print(f"剩余天数: {left_days}")
         for line in exchange_log:
             print(line)
+        if session_note:
+            print(session_note)
 
         # 5. 推送通知
         icon = "✅" if code in (0, 1) else "❌"
         notify(icon, "签到", [f"👤 {masked}", f"🎁 {result}"]
-               + [f"📝 {x}" for x in exchange_log] + [f"📅 剩余 {int(left_days)} 天"])
+               + [f"📝 {x}" for x in exchange_log] + [f"📅 剩余 {int(left_days)} 天"]
+               + ([session_note] if session_note else []))
         sys.exit(0)
 
     except urllib.error.HTTPError as e:
