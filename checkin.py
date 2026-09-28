@@ -13,6 +13,11 @@ GLaDOS 兑换方案（planType -> 所需积分 -> 天数）：
   plan500 -> 500 积分 -> 100 天
 
 通知：可选 TG_BOT_TOKEN + TG_CHAT_ID（成功/失败都会推）
+
+设备绑定说明（2026-09-25 起服务端新增）：
+  签到接口会比对会话登录设备与当前请求设备（按 User-Agent 取操作系统名），
+  不一致返回 code=4 + reason=device-mismatch。脚本按返回的 loginDevice
+  自动切换请求特征后重试一次。
 """
 import json
 import os
@@ -20,13 +25,32 @@ import sys
 import urllib.request
 import urllib.error
 
-BASE = "https://glados.space"
+SITE = "https://glados.space"
+BASE = SITE + "/api"
+HOSTNAME = "glados.space"
 
 # 兑换方案：planType -> (所需积分, 天数)
 PLANS = {
     "plan100": (100, 10),
     "plan500": (500, 100),
 }
+
+# 设备名 -> 对应平台的浏览器特征，用于匹配会话绑定的登录设备
+UA_BY_DEVICE = {
+    "Windows": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+    "Android": ("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"),
+    "iPhone": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+               "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
+    "iPad": ("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
+    "Mac": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+    "Linux": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+}
+DEFAULT_UA = os.environ.get("GR_UA", "").strip() or UA_BY_DEVICE["Windows"]
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
@@ -62,30 +86,51 @@ def notify(icon, title, lines):
         print(f"⚠️ TG 通知失败: {type(e).__name__}: {e}")
 
 
-def call(path, cookie, method="GET", body=None):
+def call(path, cookie, method="GET", body=None, ua=None):
     url = BASE + path
-    headers = {"Cookie": cookie, "User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": ua or DEFAULT_UA,
+        "Origin": SITE,
+        "Referer": SITE + "/console/checkin",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        headers["Content-Type"] = "application/json;charset=UTF-8"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method if data else "GET")
     with urllib.request.urlopen(req, timeout=20) as r:
         return r.status, json.loads(r.read().decode("utf-8"))
 
 
-def get_balance_points(cookie):
+def get_balance_points(cookie, ua):
     """从 balance 获取 points 资产的最新余额"""
-    _, bal = call("/api/user/balance", cookie)
+    _, bal = call("/user/balance", cookie, ua=ua)
     for rec in bal.get("data", []):
         if rec.get("asset") == "points":
             return float(rec.get("balance", 0))
     return 0.0
 
 
-def exchange(cookie, plan_type):
+def checkin(cookie, ua):
+    """签到，返回 (响应, ua, 备注)。设备不匹配时按会话登录设备切换特征重试一次。"""
+    _, chk = call("/user/checkin", cookie, method="POST", body={"token": HOSTNAME}, ua=ua)
+    if chk.get("code") == 4 and chk.get("reason") == "device-mismatch":
+        login_device = chk.get("loginDevice")
+        target = UA_BY_DEVICE.get(login_device)
+        if target and target != ua:
+            print(f"设备不匹配（会话绑定 {login_device}，本次请求 {chk.get('currentDevice')}），"
+                  f"切换请求特征重试")
+            _, chk = call("/user/checkin", cookie, method="POST", body={"token": HOSTNAME}, ua=target)
+            return chk, target, f"已按会话登录设备 {login_device} 切换请求特征"
+    return chk, ua, ""
+
+
+def exchange(cookie, ua, plan_type):
     """执行兑换，返回 (成功, 消息)"""
-    _, res = call("/api/user/exchange", cookie, method="POST", body={"planType": plan_type})
+    _, res = call("/user/exchange", cookie, method="POST", body={"planType": plan_type}, ua=ua)
     code = res.get("code", 1)
     msg = res.get("message", "")
     if code == 0:
@@ -95,20 +140,30 @@ def exchange(cookie, plan_type):
 
 def main():
     cookie = os.environ.get("GR_COOKIE")
+    # secret 在同一次作业内不会刷新，续期脚本写出的新 cookie 优先使用
+    cookie_file = os.environ.get("GR_COOKIE_FILE", "")
+    if cookie_file and os.path.exists(cookie_file):
+        with open(cookie_file) as f:
+            fresh = f.read().strip()
+        if fresh:
+            cookie = fresh
+            print("使用本次续期得到的新 cookie")
     if not cookie:
         print("签到失败: GR_COOKIE 环境变量未设置")
         notify("❌", "签到失败", ["原因: GR_COOKIE 环境变量未设置"])
         sys.exit(1)
 
     try:
+        ua = DEFAULT_UA
+
         # 1. 获取用户信息（邮箱 + 剩余天数）
-        _, info = call("/api/user/status", cookie)
+        _, info = call("/user/status", cookie, ua=ua)
         data = info.get("data", {})
         email = data.get("email", "未知邮箱")
         left_days = float(data.get("leftDays", 0) or 0)
 
         # 2. 签到
-        _, chk = call("/api/user/checkin", cookie, method="POST", body={})
+        chk, ua, ua_note = checkin(cookie, ua)
         code = chk.get("code", -1)
         message = chk.get("message", "")
         points = chk.get("points", 0)
@@ -118,20 +173,25 @@ def main():
             result = f"签到成功，获得 {points} 积分 (连续签到 {streak} 天)"
         elif code == 1 and "Today's observation logged" in message:
             result = "今日已签到，无需重复"
+        elif code == 4 and chk.get("reason") == "device-mismatch":
+            result = (f"设备不匹配：会话登录设备 {chk.get('loginDevice')}，"
+                      f"当前请求设备 {chk.get('currentDevice')}，签到被拒绝")
         else:
             result = f"签到结果: {message} (points={points})"
+        if ua_note:
+            result += f"（{ua_note}）"
 
         # 3. 智能兑换
         exchange_log = []
-        balance_points = get_balance_points(cookie)
+        balance_points = get_balance_points(cookie, ua)
         exchange_log.append(f"当前积分: {int(balance_points)}")
 
         # 判断是否满足兑换条件（按优先级: 100天 > 10天保底）
         if balance_points >= PLANS["plan500"][0]:
-            ok, msg = exchange(cookie, "plan500")
+            ok, msg = exchange(cookie, ua, "plan500")
             exchange_log.append(f"积分满500，兑换100天: {'成功 - ' + str(msg) if ok else '失败 - ' + str(msg)}")
         elif left_days <= 3 and balance_points >= PLANS["plan100"][0]:
-            ok, msg = exchange(cookie, "plan100")
+            ok, msg = exchange(cookie, ua, "plan100")
             exchange_log.append(f"剩余天数≤3，兑换10天: {'成功 - ' + str(msg) if ok else '失败 - ' + str(msg)}")
         else:
             # 不满足兑换条件，继续攒积分
@@ -149,7 +209,7 @@ def main():
             print(line)
 
         # 5. 推送通知
-        icon = "✅" if code in (0, 1) else "⚠️"
+        icon = "✅" if code in (0, 1) else "❌"
         notify(icon, "签到", [f"👤 {masked}", f"🎁 {result}"]
                + [f"📝 {x}" for x in exchange_log] + [f"📅 剩余 {int(left_days)} 天"])
         sys.exit(0)
